@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.orm import sessionmaker
 
-from app.agent.tools import get_product_info, list_products, lookup_orders
+from app.agent.tools import get_order_detail, get_product_info, list_products, lookup_orders
 from app.seed import seed_orders, seed_products
 
 
@@ -92,3 +92,37 @@ def test_should_return_empty_when_user_has_no_orders(tools_session):
 
     # Then
     assert result == []
+
+
+def test_should_return_full_detail_when_order_exists(tools_session):
+    # Given (AC3: order 1 = alex's AUDIO-001，已签收，张三，4 个物流事件)
+    seed_products(tools_session)
+    seed_orders(tools_session)
+
+    # When
+    result = get_order_detail(1)
+
+    # Then
+    expected_keys = {
+        "order_id", "username", "product_name", "product_sku", "quantity",
+        "unit_price", "total_amount",
+        "recipient", "address", "phone",
+        "tracking_no", "courier", "current_status", "tracking_history",
+    }
+    assert expected_keys <= result.keys()
+    assert result["current_status"] == "已签收"
+    assert result["recipient"] == "张三"
+    assert result["tracking_no"] == "SF1234567890"
+    assert len(result["tracking_history"]) == 4
+
+
+def test_should_return_error_dict_when_order_id_unknown(tools_session):
+    # Given (AC4: 不存在的 order_id 返回 error dict，不抛异常)
+    seed_products(tools_session)
+    seed_orders(tools_session)
+
+    # When
+    result = get_order_detail(999)
+
+    # Then
+    assert result == {"error": "order_not_found", "order_id": 999}

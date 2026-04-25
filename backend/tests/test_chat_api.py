@@ -1,7 +1,22 @@
+import json
+
 import pytest
+from agno.run.agent import RunCompletedEvent, RunContentEvent
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+
+def _parse_sse(text: str) -> list[tuple[str, dict]]:
+    """把 SSE 文本流拆成 [(event_type, data_dict), ...]。"""
+    blocks = [b for b in text.split("\n\n") if b.strip()]
+    parsed = []
+    for block in blocks:
+        lines = block.split("\n")
+        event = next(line[len("event: "):] for line in lines if line.startswith("event: "))
+        data = next(line[len("data: "):] for line in lines if line.startswith("data: "))
+        parsed.append((event, json.loads(data)))
+    return parsed
 
 
 class StubAgent:
@@ -53,3 +68,22 @@ def test_should_return_422_when_chat_field_missing(chat_client):
 
     # Then
     assert response.status_code == 422
+
+
+def test_should_emit_token_and_done_when_agent_yields_content_then_completed(chat_client):
+    # Given (AC16: RunContentEvent → token; RunCompletedEvent → done)
+    events = [RunContentEvent(content="hi"), RunCompletedEvent(session_id="s1")]
+    client = chat_client(events=events)
+
+    # When
+    response = client.post(
+        "/api/chat",
+        json={"message": "x", "username": "alex", "session_id": "s1"},
+    )
+
+    # Then
+    parsed = _parse_sse(response.text)
+    assert parsed == [
+        ("token", {"text": "hi"}),
+        ("done", {"session_id": "s1"}),
+    ]

@@ -581,15 +581,489 @@ def lookup_orders(username: str) -> list[dict]:
 
 ---
 
-## 后续待补充
+## Task 4 — get_order_detail
 
-> 本文档将随 Phase 3-6 推进持续追加。当前进度：
-> - ✅ Phase 1 — Specify（含 Q1 中途 pivot）
-> - ✅ Phase 1 Amendment（中文枚举）
-> - ✅ Phase 2 — Plan（含 Detroit vs London 派系讨论）
-> - ✅ Task 1 — list_products
-> - ✅ Task 2 — get_product_info（含 regression guards）
-> - ✅ Task 3 — lookup_orders（含 AC2 guard、list/get pattern 讨论）
-> - ⏸️ Task 4-12 / F1-F3
-> - ⏸️ Phase 6 — Verify 表
-> - ⏸️ 最终回顾纪律
+**覆盖 AC**：AC3（order 1 详情）/ AC4（不存在订单返 error dict）
+**状态**：✅ 完成（Red → Green → 1 regression guard → 不重构）
+
+### 教学要点 9：错误用 dict 不抛异常
+
+`get_order_detail(999) → {"error": "order_not_found", "order_id": 999}`，**不**抛 `OrderNotFoundError`。
+
+理由：
+1. **agno tool 异常会变成 ToolCallErrorEvent**，LLM 处理麻烦——它要先识别这是 error event，再决定怎么回复。
+2. **dict-as-error**：LLM 直接读出 dict，自然组织成「抱歉，未找到该订单」之类的回复，不需要任何特殊事件处理。
+3. **echo `order_id`**：让 LLM 在回复里能引用用户问的那个号码（「您查询的订单 999 没有找到，请确认号码是否正确」）。
+
+> **教学陷阱**：很多 Python 教学默认「错误用异常」。但跨进程/跨语言/跨 LLM 边界时，**异常是糟糕的接口**——结构化 dict（`{error: "code", ...}`）才是。Go 用多返回值传错误是同一思想。
+
+---
+
+## Task 5 — GET /api/orders
+
+**覆盖 AC**：AC9（alex 2 单）/ AC10（未知用户空列表）/ AC11（缺参 422）
+**状态**：✅ 完成（Red → Green → 2 regression guards → 不重构）
+
+### 教学要点 10：测试 fixture 的「组合」与「层叠」
+
+T5 引入 `api_client` fixture，**组合**了三个已有 fixture：
+
+```python
+@pytest.fixture
+def api_client(client, db_session, monkeypatch):
+    test_sessionmaker = sessionmaker(bind=db_session.get_bind(), ...)
+    monkeypatch.setattr("app.agent.tools.SessionLocal", test_sessionmaker)
+    seed_products(db_session)
+    seed_orders(db_session)
+    return client
+```
+
+- `client`（来自 conftest）：FastAPI TestClient + get_db 依赖覆盖
+- `db_session`（来自 conftest）：内存 SQLite + 表创建
+- `monkeypatch`：tools.SessionLocal 替换为测试引擎
+
+**优点**：每层 fixture 单一职责，组合时自然层叠。新测试只 `def test(api_client)` 就拿到全套环境。
+
+**反模式**：把所有逻辑塞进 conftest 的一个 god-fixture（`@pytest.fixture` def super_client(...) 50 行）——后续维护噩梦。
+
+### 教学要点 11：`Query(...)` 自动 422 是契约不是实现细节
+
+```python
+def get_orders(username: str = Query(..., min_length=1)) -> list[dict]:
+```
+
+`Query(..., min_length=1)` 让 FastAPI 在 username 缺失或为空时自动返回 422。AC11 测试这个**契约**：
+
+```python
+def test_should_return_422_when_username_query_missing(api_client):
+    response = api_client.get("/api/orders")  # 缺参
+    assert response.status_code == 422
+```
+
+测试**直接绿**（FastAPI 行为，不是我们的代码），但仍值得写——它把「缺参就 422」这个**契约决策**钉在 code 里。如果未来某人把 `Query(...)` 改成 `Query(None)`（变可选），这个测试会立刻红。
+
+---
+
+## Task 6 — GET /api/orders/{order_id}
+
+**覆盖 AC**：AC12（详情）/ AC13（不存在 404）
+**状态**：✅ 完成（Red → Green → 1 regression guard → 不重构）
+
+### 教学要点 12：HTTP 边界把「dict-as-error」翻译成 HTTPException
+
+T4 工具返回 `{"error": "order_not_found", "order_id": 999}`。
+T6 端点把它转成 HTTP 404：
+
+```python
+@router.get("/api/orders/{order_id}")
+def get_order(order_id: int) -> dict:
+    result = get_order_detail(order_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=f"order {order_id} not found")
+    return result
+```
+
+两层接口的设计哲学不同：
+- **Tool 层（agent 用）**：dict-as-error，LLM 友好
+- **HTTP 层（前端用）**：HTTPException，HTTP 状态码友好
+
+**同一份业务规则，两种边界呈现**。这是「适配器」模式的实战。
+
+### 教学要点 13：T6 Red 出现「偶然绿」要警惕
+
+T6 写 Red 时，AC13 测试（`/api/orders/999` → 404）**直接绿**——因为还没加 `/api/orders/{order_id}` 路由，FastAPI 默认对未定义路径返 404。
+
+这是**伪绿**：测试通过的原因不是我们想要的（不是「我们的端点检测到不存在的订单」），而是「路由不存在」。
+
+T6 Green 加路由后，AC13 才真的验证「我们的 404」。如果 Green 实现忘了 `if "error" in result`，AC13 会立刻红。
+
+**判断方法**：Red 出来的瞬间问「为什么红？」如果答案是「行为缺失」，红得正当；如果答案是「测试 setup 还没让到那里」，可能是伪绿。
+
+---
+
+## Task 7 — POST /api/chat 协议骨架
+
+**覆盖 AC**：AC14（content-type）/ AC15（缺字段 422）
+**状态**：✅ 完成（Red → Green → 1 regression guard → 不重构）
+
+### 教学要点 14：用 stub agent 解耦协议测试与真实 LLM
+
+T7-T10 的核心设计决策：**Chat 端点测试不调真实 LLM**。
+
+```python
+class StubAgent:
+    def __init__(self, events):
+        self._events = events
+    async def arun(self, *args, **kwargs):
+        for ev in self._events:
+            yield ev
+
+
+@pytest.fixture
+def chat_client(monkeypatch):
+    def _build(events):
+        monkeypatch.setattr("app.api.chat.get_agent", lambda: StubAgent(events))
+        return TestClient(app)
+    return _build
+```
+
+**为什么这是关键**：
+- 真实 DeepSeek 调用：3-10s/次，烧 quota，不确定（同样输入可能输出不同）
+- Stub 调用：~10ms，零成本，完全确定
+
+**SSE 事件映射逻辑只关心「输入是什么 agno event，输出是什么 SSE 块」**。这是纯函数式映射，跟 LLM 智能无关。用 stub 喂事件、断言 SSE 输出，**完全足够覆盖映射逻辑**。
+
+真实 LLM 的智能是 T11 + 端到端冒烟的事，跟 T7-T10 协议层解耦。
+
+> **教学陷阱**：很多 LLM 项目第一个测试就 `assert agent.run("查订单") == "您的订单..."`。这种测试又慢又脆——LLM 的输出不可能 == 字面值。**测协议（结构）不测语义（内容）**。
+
+### 教学要点 15：placeholder 函数 + 后期实现
+
+T7 在 `app/agent/agent.py` 写：
+```python
+def get_agent():
+    raise NotImplementedError("get_agent will be implemented in T11")
+```
+
+为什么不一上来就写真实 agent 工厂？
+- T7-T10 的关注点是 SSE 协议，**不需要真实 agent**
+- placeholder 让 chat.py 能 import + 让测试能 monkeypatch（patch 一个不存在的 attr 会失败）
+- T11 才填上真实实现，符合「专注一件事一次做完」
+
+这是 **outside-in development 的局部应用**（顶层向下），即使整体走 Detroit 派也可以局部用 London 派。
+
+---
+
+## Task 8 — SSE token + done 映射
+
+**覆盖 AC**：AC16
+**状态**：✅ 完成（Red → Green → 不重构，留待 T9）
+
+### 教学要点 16：测试基础设施值得有 helper（与生产代码不同）
+
+```python
+def _parse_sse(text: str) -> list[tuple[str, dict]]:
+    blocks = [b for b in text.split("\n\n") if b.strip()]
+    parsed = []
+    for block in blocks:
+        ...
+    return parsed
+```
+
+`_parse_sse` 反向解析 SSE 文本流，让断言写成：
+```python
+assert parsed == [("token", {"text": "hi"}), ("done", {"session_id": "s1"})]
+```
+
+而不是：
+```python
+assert "event: token" in body
+assert '"text": "hi"' in body
+...
+```
+
+**测试基础设施 helper 的标准比生产代码低**——只用 1 处也可以抽，因为它直接降低断言难度。**不要把生产代码的 rule of three 套在测试代码上**。
+
+---
+
+## Task 9 — SSE tool start/end 映射 + 抽 _emit helper
+
+**覆盖 AC**：AC17
+**状态**：✅ 完成（Red → Green → **Refactor: 抽 _emit**）
+
+### 教学要点 17：终于到了「抽抽象」的时刻
+
+T9 Green 加完 `tool/start` + `tool/end` 两个 isinstance 分支后，chat.py 里有 4 处 `f"event: X\ndata: {json.dumps(...)}\n\n"`：
+- token
+- tool/start
+- tool/end
+- done
+
+**Rule of three 跨越**。抽：
+
+```python
+def _emit(event_type: str, payload: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+```
+
+if/elif 链变成清晰的「event class → SSE type + payload mapping」：
+```python
+if isinstance(ev, RunContentEvent): yield _emit("token", {"text": ev.content})
+elif isinstance(ev, ToolCallStartedEvent): yield _emit("tool", {"name": ev.tool.tool_name, "phase": "start"})
+...
+```
+
+**关键**：T2-T8 拒绝抽 `_product_to_dict` / `_parse_logistics`，T9 主动抽 `_emit`。差别是什么？
+
+| | `_product_to_dict` | `_emit` |
+|---|---|---|
+| 重复几处？ | 2 处（T1+T2） | 4 处 |
+| 模板复杂度 | 8 行 dict 推导 | 1 行 f-string + json.dumps |
+| 抽出去隐藏什么？ | dict shape 是 LLM 契约，不能藏 | SSE 格式是技术细节，能藏 |
+| 改抽象的成本 | 高（多个 caller 期待 shape 变化） | 低（一个内部 helper） |
+
+**rule of three 不是教条**，配合「抽出去会损失什么」一起评估。`_emit` 抽出去**反而提升可读性**——不是 DRY，是降噪。
+
+---
+
+## Task 10 — SSE error 映射 + endpoint 兜底
+
+**覆盖 AC**：AC18
+**状态**：✅ 完成（Red → Green → 不重构）
+
+### 教学要点 18：超过 Red 要求加防御代码的取舍
+
+T10 Green 不只加 `RunErrorEvent` 的 isinstance 分支（Red 要求），还把整个 `async for` 包了 `try/except`：
+
+```python
+async def sse():
+    try:
+        async for ev in agent.arun(...):
+            ...
+            elif isinstance(ev, RunErrorEvent):
+                yield _emit("error", {"message": ev.content})
+                return
+    except Exception as e:  # noqa: BLE001 — endpoint-level fallback for Q4-A UX
+        yield _emit("error", {"message": str(e)})
+```
+
+`try/except` 没有具体测试驱动。严格 TDD 派会拒绝这种「测试外」代码。
+
+**这次接受的理由**：
+- Q4-A 把「error UX」钉死了 spec 决策——「用户永远看到 error event，不看到 500」
+- agno 的 `arun` 在某些极端情况（API key 错误、网络故障）会**抛异常而非 yield error event**
+- 这是同一个责任的两面，分开两个任务反而割裂
+
+**注释 `# noqa: BLE001` 是关键**：明确说「我知道 bare except 是 lint 警告，但这是有意的兜底」。**用 lint disable 当做留言条**，让 reviewer 知道这不是疏忽。
+
+---
+
+## Task 11 — 真实 agent factory
+
+**覆盖 AC**：无具体 AC（构造性测试）
+**状态**：✅ 完成（Red → Green → 不重构）
+
+### 教学要点 19：构造性测试与行为测试的区别
+
+T11 测试不调 LLM、不发请求，只验证「构造出的 Agent 实例是否符合 spec」：
+
+```python
+agent = get_agent()
+assert isinstance(agent, Agent)
+tool_names = {t.__name__ for t in agent.tools}
+assert tool_names == {"list_products", "get_product_info", "lookup_orders", "get_order_detail"}
+assert "<faq>" in agent.instructions
+assert agent.add_history_to_context is True
+assert agent.num_history_runs == 10
+```
+
+这是**构造性测试（构造对象后验证内部状态）**，不是**行为测试（调用方法后验证返回）**。
+
+构造性测试的价值：
+- 配置错误立刻发现（少注册 1 个工具会立刻红）
+- 不依赖外部服务（可以在 CI 里跑）
+- 速度快（~10ms）
+
+**何时用构造性测试**：当对象构造本身就是关键决策时（如 dependency wiring、配置加载）。这时「构造对了」就是「行为对了」的前置条件。
+
+### 教学要点 20：fresh_agent_module fixture 重置单例
+
+```python
+@pytest.fixture
+def fresh_agent_module(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    from app.agent import agent as agent_mod
+    monkeypatch.setattr(agent_mod, "_agent", None, raising=False)
+    return agent_mod
+```
+
+`get_agent()` 是单例（global `_agent`）。多个测试如果不重置，后续测试拿到的是首次构造的实例——破坏隔离性。
+
+`monkeypatch.setattr(..., None)` 在每个测试前把 `_agent` 重置为 None，强制下次 `get_agent()` 重新构造。pytest 拆 fixture 时自动 unpatch。
+
+**单例 + 测试隔离的标准模式**。Java 里的 @Before/@After 同思想。
+
+---
+
+## Task 12 — main.py 接线
+
+**覆盖 AC**：无具体 AC（接线任务）
+**状态**：✅ 完成
+
+### 任务内容
+
+- `pyproject.toml`：加 `agno>=2.6` / `openai>=1.0` / `python-dotenv>=1.0`
+- `main.py`：`from dotenv import load_dotenv` + `load_dotenv()`
+- `main.py`：`app.include_router(chat_api.router)`
+- `.env`：写入 `DEEPSEEK_API_KEY`（gitignored）
+- `.env.example`：模板（入库）
+
+### 教学要点 21：接线任务也算一个 task
+
+T12 没有新 Red 测试驱动，只是「把零件装起来」。但仍单独成一个 task：
+
+- **commit 粒度对齐功能粒度**：T11 测「agent 能构造」，T12 测「app 能起来」（隐式：所有 35 测试通过 + OpenAPI 含 4 端点）
+- **风险隔离**：如果 deps 装错或 env 没加载，T12 的 commit 一目了然
+- **回滚单位清晰**：未来发现 dotenv 出问题，`git revert` T12 commit 就行
+
+**verify 检查**：
+- `pytest -q` → `35 passed`
+- `python -c "from app.main import app; print(app.openapi()['paths'].keys())"` → 含 `/api/chat`、`/api/orders`、`/api/orders/{order_id}`、`/api/products`
+
+---
+
+## F1-F3 — 前端集成
+
+**状态**：✅ 完成（无 pytest，靠手动冒烟）
+
+### F1 — useChat composable
+
+`fetch + ReadableStream + TextDecoderStream` 解析 SSE。**不用 EventSource** 因为 EventSource 只支持 GET。
+
+关键设计：**buffer 跨网络分块**。SSE 一个事件可能横跨多个 TCP 包：
+```js
+let buffer = ''
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  buffer += value
+  const [events, remainder] = _parseSseChunk(buffer)
+  buffer = remainder  // ← 残余不完整的部分留到下一轮
+  for (const ev of events) { ... }
+}
+```
+
+不处理 buffer 残余 = SSE 解析在网络分块边界会**丢事件**或**解析错位**。
+
+### F2 — CsrPanel.vue
+
+右侧 360px 滑入面板。4 类气泡（user/assistant/tool/error）。`sessionStorage` 存 session_id（Q5-A）。
+
+**克制设计**（匹配 .impeccable.md 品牌规范）：
+- 单 forest-green 强调色（发送按钮、输入聚焦边框）
+- hairline 1px 边框（无圆角气泡的卡通感）
+- 工具状态行用小灰字斜体（不抢注意力）
+- 错误用沉稳红 + 重试按钮（不用刺眼 #ff0000）
+
+### F3 — App.vue 集成
+
+3 处改动：
+1. `import CsrPanel`
+2. `panelOpen = ref(false)` + `handleCsrClick` 改成 toggle（未登录先 toast）
+3. 模板加 `<CsrPanel v-model:open=... :username=... :api-base=... />`
+
+### 教学要点 22：前端没 TDD 也要保证质量
+
+前端没有 pytest，但仍可控：
+- `npm run build` 跑一次确认 syntax/import 干净
+- 在浏览器开发者工具的 Network 看 SSE 流逐 chunk 到达
+- 手动冒烟清单（plan.md F3 节）：登录、点 FAB、问订单、问 FAQ、关 tab 再开
+
+**不能 TDD 不等于不能纪律化测试**。手动清单 + build 检查 + 心理验证（每改一处问「这会破什么」）是替代方案。
+
+---
+
+## Phase 6 — Verify 表
+
+把 21 条 AC 逐条对应测试：
+
+| # | AC | 覆盖测试 | 状态 |
+|---|---|---|---|
+| 1 | lookup_orders("alex") → 2 单含 9 键 | `test_should_return_two_orders_when_querying_alex` | ✅ |
+| 2 | lookup_orders("nobody") → [] | `test_should_return_empty_when_user_has_no_orders` | ✅ |
+| 3 | get_order_detail(1) → 14 键、已签收、4 历史 | `test_should_return_full_detail_when_order_exists` | ✅ |
+| 4 | get_order_detail(999) → error dict | `test_should_return_error_dict_when_order_id_unknown` | ✅ |
+| 5 | get_product_info("蓝牙耳机") → AUDIO-001 | `test_should_return_AUDIO_001_when_searching_by_chinese_name` | ✅ |
+| 6 | get_product_info("KB-001") → 机械键盘 | `test_should_return_KB_001_when_searching_by_sku` | ✅ |
+| 7 | get_product_info("不存在") → [] | `test_should_return_empty_when_searching_unknown_product` | ✅ |
+| 8 | list_products() → 8 件 | `test_should_return_8_products_when_listing_all` | ✅ |
+| 9 | GET /api/orders?username=alex → 200 + 2 单 | `test_should_return_alex_orders_when_get_orders_by_username` | ✅ |
+| 10 | GET /api/orders?username=nobody → 200 + [] | `test_should_return_empty_list_when_username_has_no_orders` | ✅ |
+| 11 | GET /api/orders 缺参 → 422 | `test_should_return_422_when_username_query_missing` | ✅ |
+| 12 | GET /api/orders/1 → 200 + 14 键 + 4 历史 + 已签收 | `test_should_return_order_detail_when_get_by_id` | ✅ |
+| 13 | GET /api/orders/999 → 404 + detail | `test_should_return_404_when_order_id_unknown` | ✅ |
+| 14 | POST /api/chat 合法 → 200 + text/event-stream | `test_should_return_event_stream_content_type_when_post_chat` | ✅ |
+| 15 | POST /api/chat 缺字段 → 422 | `test_should_return_422_when_chat_field_missing` | ✅ |
+| 16 | SSE token + done 映射 | `test_should_emit_token_and_done_when_agent_yields_content_then_completed` | ✅ |
+| 17 | SSE tool start/end 映射 | `test_should_emit_tool_start_and_end_when_agent_calls_tool` | ✅ |
+| 18 | SSE error 映射 + HTTP 不报 500 | `test_should_emit_error_when_agent_yields_run_error` | ✅ |
+| 19 | 点 FAB 开右侧面板 | F3 手动冒烟 | ⏳ 待用户烟测 |
+| 20 | 流式渲染 + 工具状态行 | F3 手动冒烟 | ⏳ 待用户烟测 |
+| 21 | Session 隔离（多 tab 多用户） | F3 手动冒烟 | ⏳ 待用户烟测 |
+
+**自动化覆盖**：18/21 条 AC（85%）。剩 3 条是 UI 级行为，spec 规定走手动冒烟（plan.md F3 节列了清单）。
+
+**额外覆盖**：1 条「构造性测试」（T11 agent factory，无对应 AC，但保证零件装得对）。
+
+### Verify 副产品：spec 漏洞清单
+
+跑完发现 spec 没明确定义的灰色地带（不是 bug，是 spec 不完整）：
+
+1. **多 token 拼接**：spec AC16 只测了「单个 RunContentEvent」。真实 LLM 会 yield 几十个 RunContentEvent，每次 1-3 字符。当前实现按顺序 append 在 chat.py 里，但 useChat 在前端做拼接时没测。手动冒烟会发现。
+2. **工具调用错误（ToolCallErrorEvent）**：spec 没定义。当前 chat.py 没分支，会被忽略。如果 tool 抛了异常，agent 看不到，可能继续幻觉。**spec 漏洞**。
+3. **多个并发用户**：agno SqliteDb 的 SQLite 在并发写场景下可能锁。生产场景需 PostgreSQL。spec Non-goals 没明确说。
+4. **空响应**：如果 LLM 一句话都不说就 done，前端 assistant 气泡会是空字符串。spec 没规定 UX。
+5. **重试按钮的 session 行为**：错误后点重试，是用同一 session_id 还是新建？当前实现用同一 session_id，但 spec 没钉。
+
+这些放进 backlog，不影响本次「全绿验收」。
+
+---
+
+## 总结：实施过程中浮现的纪律
+
+1. **Spec 的 Q&A 比 AC 数字还重要**。Q1 一开始锁 A，中途 pivot 到「数据用中文」（Phase 1 amendment）让所有翻译复杂度消失。**写 spec 不是把已知决策抄一遍，是逼出隐性决策**。
+2. **测试断言绑行为，不绑实现**。Phase 1 测试用 `{s.value for s in TrackingStatus}` 让 enum 中文化重构零成本；T3 用 `set` 比较 order_id 让排序变更不会炸测试。
+3. **Detroit vs London 派系是工具不是教条**。spec 完整、依赖成熟时走 Detroit（底层向上）；spec 模糊、接口未知时走 London。我们这次走 Detroit，理由全部写在 journey「为什么底层向上」节。
+4. **TDD 真正的纪律是 Refactor 阶段的「不动」**。T1-T8 共 8 次 refactor 评估，7 次决定不动。每次都明确写出「考虑了 X，不抽因为 Y」——**主动拒绝**，不是「忘了考虑」。
+5. **Rule of three 不是教条，配合「抽出去隐藏什么」一起评估**。T9 抽 `_emit`（4 处使用 + 抽出去提升可读性），T2 不抽 `_product_to_dict`（2 处使用 + 抽出去隐藏 LLM 契约）。
+6. **测试基础设施 helper 的标准比生产代码低**。`_parse_sse` 只用一处也抽，因为它直接降低断言难度——不能用「rule of three」反对它。
+7. **「不调真实 LLM」是 LLM 项目 TDD 的核心**。stub agent + 注入事件让 SSE 协议测试快、稳、确定。真实 LLM 的智能留给 T11 + 端到端冒烟。
+8. **错误用 dict 不抛异常（跨进程边界）**。tool 返回 `{error: ...}` 让 LLM 自然处理；HTTP 边界再翻成 HTTPException。**同一规则在不同边界呈现不同**。
+9. **「placeholder + 后期实现」是 outside-in 的局部应用**。T7-T10 用 placeholder `get_agent` 不实现，T11 才填上。Detroit 整体 + London 局部可以共存。
+10. **构造性测试在 wiring 任务里至关重要**。T11 没有「行为测试」，只验证「构造对了」——这就足以保证生产能起来。
+11. **接线 task 也值得独立 commit**。T12 只做 `load_dotenv` + `include_router`，但 commit 粒度对齐功能粒度，未来 revert 一目了然。
+12. **手动冒烟清单是前端 TDD 的替代方案**。前端不能 TDD（UI 是视觉），但可以：build 检查 + 浏览器 devtools + 清晰的手动清单。
+
+---
+
+## 最终产出
+
+```
+customer-service/
+├── backend/
+│   ├── .env                              # gitignored，含 DEEPSEEK_API_KEY
+│   ├── .env.example                      # 模板入库
+│   ├── pyproject.toml                    # 加 agno + openai + python-dotenv
+│   ├── app/
+│   │   ├── main.py                       # 加 load_dotenv + 2 个 include_router
+│   │   ├── schemas.py                    # Phase 1 amendment：TrackingStatus 中文化
+│   │   ├── seed.py                       # Phase 1 amendment：所有 status 中文
+│   │   ├── agent/                        # 新增
+│   │   │   ├── agent.py                  # T11 真实 factory
+│   │   │   ├── faq.md                    # ~80 行 FAQ markdown
+│   │   │   ├── knowledge.py              # 加载 faq.md
+│   │   │   └── tools.py                  # T1-T4 4 个工具
+│   │   └── api/                          # 新增
+│   │       ├── chat.py                   # T7-T10 SSE 端点
+│   │       └── orders.py                 # T5-T6 REST 端点
+│   └── tests/                            # 9 个测试文件，35 个测试，全绿
+│       ├── test_agent_factory.py         # T11
+│       ├── test_agent_tools.py           # T1-T4（6 测试）
+│       ├── test_chat_api.py              # T7-T10（5 测试）
+│       ├── test_orders_api.py            # T5-T6（5 测试）
+│       └── (Phase 1 原有 5 文件 16 测试)
+├── frontend/src/
+│   ├── App.vue                           # F3 改 3 处
+│   ├── composables/useChat.js            # F1 SSE 解析
+│   └── components/CsrPanel.vue           # F2 右侧面板
+└── specs/csr-agent/
+    ├── spec.md                           # 21 AC，5 个 Q 全 A
+    ├── plan.md                           # 12 后端 + 3 前端
+    └── journey.md                        # 本文件
+```
+
+**测试套件**：`cd backend && pytest -q` → `35 passed in ~0.1s`
+**OpenAPI**：`/api/products` `/api/orders` `/api/orders/{order_id}` `/api/chat`
+**前端构建**：`cd frontend && npm run build` → `built in ~300ms, ~32 KB gzip JS`
+
+剩余 = 用户启 `uvicorn` + `npm run dev` 端到端冒烟（验证 AC19-21 + Q4 重试按钮 + Q5 sessionStorage）。

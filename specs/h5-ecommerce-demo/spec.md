@@ -48,11 +48,11 @@
   "phone": "string",
   "tracking_no": "string",
   "courier": "string",
-  "current_status": "order_placed | shipped | in_transit | delivered",
+  "current_status": "已下单 | 已发货 | 运输中 | 已签收",
   "tracking_history": [
     {
       "timestamp": "ISO8601 string, e.g. 2026-04-15T10:00:00",
-      "status": "order_placed | shipped | in_transit | delivered",
+      "status": "已下单 | 已发货 | 运输中 | 已签收",
       "location": "string",
       "description": "string"
     }
@@ -64,7 +64,7 @@
 - 7 個頂層欄位皆必填。
 - `tracking_history` 至少 1 筆 event。
 - `current_status` 必須等於 `tracking_history` 最後一筆的 `status`。
-- `status` 枚舉值：`order_placed` / `shipped` / `in_transit` / `delivered`。
+- `status` 枚舉值：`已下单` / `已发货` / `运输中` / `已签收`。
 
 ## Public API（第一期）
 
@@ -132,8 +132,8 @@
 9. **物流 JSON 結構**：每一筆訂單的 `logistics_info` 解析後含 7 個頂層欄位（`recipient` / `address` / `phone` / `tracking_no` / `courier` / `current_status` / `tracking_history`），無多餘無缺漏。
 10. **物流 history 非空**：`tracking_history` 至少 1 筆 event，每筆 event 含 4 欄（`timestamp` / `status` / `location` / `description`）。
 11. **物流狀態一致**：`current_status` 等於 `tracking_history` 最後一筆的 `status`。
-12. **物流狀態枚舉**：所有 `status` 值 ∈ {`order_placed`, `shipped`, `in_transit`, `delivered`}。
-13. **5 筆訂單覆蓋多種狀態**：5 筆訂單的 `current_status` 至少涵蓋 **3 種不同**狀態（如 `delivered` / `in_transit` / `shipped`）。
+12. **物流狀態枚舉**：所有 `status` 值 ∈ {`已下单`, `已发货`, `运输中`, `已签收`}。
+13. **5 筆訂單覆蓋多種狀態**：5 筆訂單的 `current_status` 至少涵蓋 **3 種不同**狀態（如 `已签收` / `运输中` / `已发货`）。
 14. **應用啟動可重入**：連續啟動兩次應用，products / orders 各表筆數仍為 8 / 5（seed 操作冪等）。
 
 ### 前端 / UI（手動冒煙測試，不在 pytest 範圍）
@@ -215,11 +215,11 @@
 
 | # | username | product_sku | quantity | current_status |
 |---|---|---|---|---|
-| 1 | alex | AUDIO-001 | 2 | delivered |
-| 2 | alex | KB-001 | 1 | in_transit |
-| 3 | tom | WATCH-001 | 1 | delivered |
-| 4 | jerry | MOUSE-001 | 3 | shipped |
-| 5 | jerry | CABLE-001 | 5 | delivered |
+| 1 | alex | AUDIO-001 | 2 | 已签收 |
+| 2 | alex | KB-001 | 1 | 运输中 |
+| 3 | tom | WATCH-001 | 1 | 已签收 |
+| 4 | jerry | MOUSE-001 | 3 | 已发货 |
+| 5 | jerry | CABLE-001 | 5 | 已签收 |
 
 物流 history 範例（訂單 #1：alex 已送達的蓝牙耳机·Pro）：
 ```json
@@ -229,12 +229,12 @@
   "phone": "13800138000",
   "tracking_no": "SF1234567890",
   "courier": "顺丰速运",
-  "current_status": "delivered",
+  "current_status": "已签收",
   "tracking_history": [
-    {"timestamp": "2026-04-15T10:00:00", "status": "order_placed", "location": "北京",         "description": "订单已创建"},
-    {"timestamp": "2026-04-16T14:30:00", "status": "shipped",      "location": "北京发货中心", "description": "已从仓库发出"},
-    {"timestamp": "2026-04-17T09:15:00", "status": "in_transit",   "location": "上海中转中心", "description": "运输中"},
-    {"timestamp": "2026-04-18T16:45:00", "status": "delivered",    "location": "上海市浦东新区", "description": "已签收"}
+    {"timestamp": "2026-04-15T10:00:00", "status": "已下单", "location": "北京",         "description": "订单已创建"},
+    {"timestamp": "2026-04-16T14:30:00", "status": "已发货", "location": "北京发货中心", "description": "已从仓库发出"},
+    {"timestamp": "2026-04-17T09:15:00", "status": "运输中", "location": "上海中转中心", "description": "运输中"},
+    {"timestamp": "2026-04-18T16:45:00", "status": "已签收", "location": "上海市浦东新区", "description": "已签收"}
   ]
 }
 ```

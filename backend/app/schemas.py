@@ -16,10 +16,10 @@ class ProductOut(BaseModel):
 
 
 class TrackingStatus(str, Enum):
-    order_placed = "order_placed"
-    shipped = "shipped"
-    in_transit = "in_transit"
-    delivered = "delivered"
+    order_placed = "已下单"
+    shipped = "已发货"
+    in_transit = "运输中"
+    delivered = "已签收"
 
 
 class TrackingEvent(BaseModel):

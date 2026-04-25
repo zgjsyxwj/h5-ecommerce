@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -10,6 +11,8 @@ from app.database import get_db
 from app.models import Product
 from app.schemas import ProductOut
 from app.seed import init_database
+
+load_dotenv()
 
 
 @asynccontextmanager

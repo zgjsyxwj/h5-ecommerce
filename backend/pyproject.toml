@@ -8,6 +8,9 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "sqlalchemy>=2.0",
     "pydantic>=2.6",
+    "agno>=2.6",
+    "openai>=1.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

@@ -70,11 +70,11 @@
 
 | # | 用户 | 商品 | 数量 | 总额 | 物流状态 |
 |---|---|---|---|---|---|
-| 1 | alex | 蓝牙耳机·Pro | 2 | 598.00 | delivered |
-| 2 | alex | 机械键盘·87 键 | 1 | 459.00 | in_transit |
-| 3 | tom | 智能手表·X7 | 1 | 899.00 | delivered |
-| 4 | jerry | 无线鼠标·静音款 | 3 | 297.00 | shipped |
-| 5 | jerry | USB-C 数据线·三件装 | 5 | 199.50 | delivered |
+| 1 | alex | 蓝牙耳机·Pro | 2 | 598.00 | 已签收 |
+| 2 | alex | 机械键盘·87 键 | 1 | 459.00 | 运输中 |
+| 3 | tom | 智能手表·X7 | 1 | 899.00 | 已签收 |
+| 4 | jerry | 无线鼠标·静音款 | 3 | 297.00 | 已发货 |
+| 5 | jerry | USB-C 数据线·三件装 | 5 | 199.50 | 已签收 |
 
 每笔订单包含完整的物流追踪历史（tracking_history）：下单 → 已发货 → 运输中 → 已签收。
 
@@ -205,17 +205,17 @@ customer-service/
   "phone": "13800138000",
   "tracking_no": "SF1234567890",
   "courier": "顺丰速运",
-  "current_status": "delivered",
+  "current_status": "已签收",
   "tracking_history": [
     {
       "timestamp": "2026-04-15T10:00:00",
-      "status": "order_placed",
+      "status": "已下单",
       "location": "北京",
       "description": "订单已创建"
     },
     {
       "timestamp": "2026-04-18T16:45:00",
-      "status": "delivered",
+      "status": "已签收",
       "location": "上海市浦东新区",
       "description": "已签收"
     }
@@ -229,7 +229,7 @@ customer-service/
 - `tracking_history` 至少 1 条事件。
 - 每条事件含 4 个字段：timestamp / status / location / description。
 - `current_status` 必须等于 `tracking_history` 最后一条的 `status`。
-- `status` 枚举值：`order_placed` / `shipped` / `in_transit` / `delivered`。
+- `status` 枚举值：`已下单` / `已发货` / `运输中` / `已签收`（Phase 2 amendment：枚举值统一中文，避免翻译层）。
 
 ### 2.5 API 接口
 
@@ -318,41 +318,92 @@ tests/test_seed_idempotency.py      ← 重启不重复
 
 ## 三、本地启动
 
-### 3.1 启动后端
+### 3.0 前置要求
+
+- **Python**：3.12（其他版本未测试，`pyproject.toml` 钉死 `>=3.12,<3.13`）
+- **Node**：建议 18+（Vite 5 要求）
+- **DeepSeek API Key**：访问 [https://platform.deepseek.com/](https://platform.deepseek.com/) 注册账号、创建 key
+
+### 3.1 启动后端（首次）
 
 ```bash
 cd backend
+
+# 1) 建虚拟环境
 python3.12 -m venv .venv
+
+# 2) 安装依赖（含 agno、openai、python-dotenv 等）
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/uvicorn app.main:app --port 8001 --host 127.0.0.1
+
+# 3) 配置 DeepSeek API Key（智能客服必需）
+cp .env.example .env
+# 编辑 .env 文件，填入 DEEPSEEK_API_KEY=sk-xxxxxxxx
+
+# 4) 启动开发服务器
+.venv/bin/uvicorn app.main:app --reload --port 8001 --host 127.0.0.1
 ```
 
-启动后访问 `http://127.0.0.1:8001/docs` 可见 OpenAPI 自动生成的 Swagger UI。
+后续启动只需第 4 步。
+
+启动后：
+- API 根：`http://127.0.0.1:8001/`
+- Swagger UI：`http://127.0.0.1:8001/docs`（可见 4 个端点：`/api/products`、`/api/orders`、`/api/orders/{order_id}`、`/api/chat`）
+
+> **未配 `DEEPSEEK_API_KEY`** 时，`/api/products`、`/api/orders` 仍可用；只有 `/api/chat` 在第一次调用时报错。
 
 ### 3.2 启动前端
 
+另开 terminal：
+
 ```bash
 cd frontend
-npm install
+npm install         # 首次
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5173/` 看到完整页面。
+打开 `http://127.0.0.1:5173/` 看到完整 H5 商城。
 
 ### 3.3 运行测试
 
 ```bash
 cd backend
-.venv/bin/pytest -q     # 16 passed
+.venv/bin/pytest -q     # 35 passed
 .venv/bin/pytest -v     # 详细列出每个测试
 ```
 
-### 3.4 重置演示数据
+测试不调用真实 LLM（用 stub agent 注入），跑完只需约 0.1 秒。
+
+### 3.4 端到端烟测（智能客服）
+
+在前端页面 (`http://127.0.0.1:5173/`)：
+
+1. **登录**：用户名输入框选 `alex`（也支持 `tom` / `jerry`），点「登录」
+2. **打开客服**：点右下角浮动按钮 → 右侧滑入面板
+3. **测试 4 大能力**：
+
+| 问 | 期望行为 |
+|---|---|
+| 我的订单到哪了 | 灰字「正在调用 lookup_orders…」+ 流式回复列出 alex 的 2 单（运输中 + 已签收） |
+| 订单 1 物流详情 | 调用 `get_order_detail`，给出 4 个物流时间节点 |
+| 蓝牙耳机多少钱 | 调用 `get_product_info("蓝牙耳机")`，答 ¥299 |
+| 7 天无理由怎么操作 | 引用 FAQ 内容回答（不调任何工具） |
+| 怎么修改收货地址 | 引用 FAQ「发货前免费改」 |
+
+4. **测试错误恢复**：临时把 `.env` 里的 `DEEPSEEK_API_KEY` 改成 `sk-invalid` 重启后端 → 再发消息 → 应看到「服务暂时不可用」+「重试」按钮（验证 spec Q4-A）
+5. **测试 session 隔离**：关 tab 重开 → 历史消息消失（sessionStorage，验证 spec Q5-A）；同 tab 内关闭面板再打开 → 历史保留
+
+### 3.5 重置演示数据
 
 ```bash
 cd backend
-rm demo.db              # 删除数据库
-# 下次启动应用时会重新建表 + seed
+
+# 重置电商数据（products + orders）
+rm demo.db
+
+# 重置客服对话历史（所有 session 清空）
+rm agent.db
+
+# 下次启动后端时 demo.db 会自动 seed；agent.db 会按需创建
 ```
 
 ---

@@ -5,6 +5,7 @@ from agno.models.response import ToolExecution
 from agno.run.agent import (
     RunCompletedEvent,
     RunContentEvent,
+    RunErrorEvent,
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
 )
@@ -118,3 +119,20 @@ def test_should_emit_tool_start_and_end_when_agent_calls_tool(chat_client):
         ("tool", {"name": "lookup_orders", "phase": "end"}),
         ("done", {"session_id": "s1"}),
     ]
+
+
+def test_should_emit_error_when_agent_yields_run_error(chat_client):
+    # Given (AC18: RunErrorEvent → error event；HTTP 仍 200，不报 500)
+    events = [RunErrorEvent(content="api timeout")]
+    client = chat_client(events=events)
+
+    # When
+    response = client.post(
+        "/api/chat",
+        json={"message": "x", "username": "alex", "session_id": "s1"},
+    )
+
+    # Then
+    assert response.status_code == 200
+    parsed = _parse_sse(response.text)
+    assert parsed == [("error", {"message": "api timeout"})]

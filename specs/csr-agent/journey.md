@@ -357,13 +357,133 @@ Kent Beck 原始 TDD 描述里，Refactor 是 **第三步**，但比例上应该
 
 ---
 
+## Task 2 — get_product_info
+
+**覆盖 AC**：AC5（按名搜）/ AC6（按 SKU 搜）/ AC7（无匹配）
+**状态**：✅ 完成（Red → Green → 2 regression guards → 不重构）
+
+### 测试顺序的战略选择
+
+T2 涉及 3 条并行 AC。两种做法：
+
+**(a) 严格 TDD 派**：写 3 个 Red 各驱动一段 Green。
+- Red 1: 按名 → Green: `where(name like)`
+- Red 2: 按 SKU → Green 改成 `where(or_(name like, sku like))`
+- Red 3: 无匹配 → 直接绿（`[]` 是自然结果）
+
+**(b) 实用 Detroit 派（这次选这个）**：写 1 个 Red，Green 一次性满足 spec 的并行行为，剩余 2 条作为 regression guards 直接绿。
+- Red: `get_product_info("蓝牙耳机")` → 按名
+- Green: `where(or_(name like, sku like))`，**预防性**覆盖 SKU 也能搜
+- Regression Guard 1（直接绿）：按 SKU 搜
+- Regression Guard 2（直接绿）：无匹配
+
+**为什么选 (b)？**
+- spec 已经把 3 条契约写死，**不需要再用 TDD 帮我们「发现」SKU 也要支持**
+- (a) 中间会经过「按名能搜、按 SKU 不能搜」的中间状态，留在 commit 历史里反而误导
+- (b) 中 Green 用了 `or_(...)`，这点超过 Red 严格要求 —— **理论上违反「最小绿」原则**，但 spec 已锁定的并行行为是合理的预防
+
+> **辨别什么时候 (a) 合理**：spec 没说 SKU 要支持，纯靠 TDD 倒推接口形状的项目。这次 spec 完整，不属于这种情况。
+
+### Red 验证结果
+
+```
+ImportError: cannot import name 'get_product_info' from 'app.agent.tools'
+```
+
+行为缺失型红 ✅。
+
+### Green 实现
+
+`tools.py` 加了 `or_` import 和新函数：
+
+```python
+from sqlalchemy import or_, select  # ← or_ 新增
+
+def get_product_info(query: str) -> list[dict]:
+    """按商品名称或 SKU 模糊查询商品。"""
+    pattern = f"%{query}%"
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(Product).where(or_(Product.name.like(pattern), Product.sku.like(pattern)))
+        ).all()
+        return [
+            {
+                "id": p.id, "name": p.name, "sku": p.sku,
+                "stock": p.stock, "price": str(p.price), "image_url": p.image_url,
+            }
+            for p in rows
+        ]
+```
+
+### Regression Guards：直接绿也值得写
+
+```python
+def test_should_return_KB_001_when_searching_by_sku(tools_session):
+    # Given (AC6: get_product_info 也支持 SKU 模糊匹配)
+    seed_products(tools_session)
+    result = get_product_info("KB-001")
+    assert len(result) == 1
+    assert result[0]["name"] == "机械键盘·87 键"
+
+
+def test_should_return_empty_when_searching_unknown_product(tools_session):
+    # Given (AC7: 无匹配返回空列表，不抛异常)
+    seed_products(tools_session)
+    result = get_product_info("不存在的商品")
+    assert result == []
+```
+
+**为什么写直接绿的测试也有价值？**
+- AC6 / AC7 是 spec 钉死的行为。如果未来谁把 Green 改成 `where(Product.name.like(...))`（去掉 sku 分支），AC6 测试会立刻红 —— **这就是回归护栏的意义**。
+- 没有这两个 guard，spec 的「按 SKU 也能搜」「无匹配返回空」就只活在 spec.md 文字里，code 层面无人守护。
+- 注释 `# Given (AC6: ...)` 让测试和 spec AC 双向追溯。
+
+### 教学要点 6：Refactor 评估的完整推理过程
+
+`tools.py` 现在有两段几乎一样的 dict 推导：
+
+```python
+# in list_products
+return [{"id": p.id, "name": p.name, ...} for p in rows]
+
+# in get_product_info
+return [{"id": p.id, "name": p.name, ...} for p in rows]
+```
+
+是不是该抽 `_product_to_dict(p) -> dict`？
+
+**评估清单**（每条都要回答）：
+
+| 问题 | 答案 | 影响 |
+|---|---|---|
+| 当前重复几处？ | 2 | < 3，rule of three 不过 |
+| 未来会到 3 处吗？ | 不会。T3/T4/T5/T6 都是 order dict，不是 product dict | 可能永远停在 2 |
+| 重复的成本？ | 16 行 vs 9 行 helper，省 7 行 | modest |
+| 抽出去的接口能稳定命名吗？ | 能（`_product_to_dict`） | ✅ |
+| 抽出去会损失什么？ | **agno 工具契约**：函数返回 dict 的 inline 形态 = LLM 可读的 schema。helper 隐藏返回 shape。 | ❌ 大 |
+
+**决策：不抽**。最强的反对理由是第 5 条 —— 这是 agent 工具，不是普通工具函数。**LLM 通过函数签名和返回值结构理解契约**，inline dict 是「契约即文档」。helper 抽象会让契约隐藏在私有函数里。
+
+> **对比 parking-fee 的 Task 4 才抽常数**：那次抽 `FREE_MINUTES / HOURLY_RATE / DAILY_CAP` 是因为 3 个**业务旋钮**并存形成「家族」。我们这里是 **数据形态**，不是业务规则，没有「家族」性质。
+
+### 教学要点 7：Refactor 决策必须是「主动拒绝」，不是「忘记考虑」
+
+每一次绿之后，refactor 阶段都应该有这样的输出：
+
+> 我考虑过 X 重构。它的好处是 [...]，代价是 [...]，决定不动 / 现在动。
+
+**写在 journey 里、commit message 里、code review 评论里**。这样未来读者能看到「不是没想到，是想到了不动」。否则别人会反复试图抽出来，每次都被拒绝又不知道为什么。
+
+---
+
 ## 后续待补充
 
 > 本文档将随 Phase 3-6 推进持续追加。当前进度：
 > - ✅ Phase 1 — Specify（含 Q1 中途 pivot）
 > - ✅ Phase 1 Amendment（中文枚举）
-> - ✅ Phase 2 — Plan
-> - ⏸️ Task 1 — Red 提案中，等待用户确认
-> - ⏸️ Task 2-12 / F1-F3
+> - ✅ Phase 2 — Plan（含 Detroit vs London 派系讨论）
+> - ✅ Task 1 — list_products
+> - ✅ Task 2 — get_product_info（含 regression guards）
+> - ⏸️ Task 3-12 / F1-F3
 > - ⏸️ Phase 6 — Verify 表
 > - ⏸️ 最终回顾纪律

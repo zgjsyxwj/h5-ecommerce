@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
+from app.api import chat as chat_api
 from app.api import orders as orders_api
 from app.database import get_db
 from app.models import Product
@@ -33,3 +34,4 @@ def list_products(db: Session = Depends(get_db)) -> list[Product]:
 
 
 app.include_router(orders_api.router)
+app.include_router(chat_api.router)

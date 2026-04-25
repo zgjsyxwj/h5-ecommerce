@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
+from app.api import orders as orders_api
 from app.database import get_db
 from app.models import Product
 from app.schemas import ProductOut
@@ -29,3 +30,6 @@ app.add_middleware(
 @app.get("/api/products", response_model=list[ProductOut])
 def list_products(db: Session = Depends(get_db)) -> list[Product]:
     return db.query(Product).all()
+
+
+app.include_router(orders_api.router)

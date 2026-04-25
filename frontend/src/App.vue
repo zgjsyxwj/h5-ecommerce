@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import CsrPanel from './components/CsrPanel.vue'
 
 const API_BASE = 'http://localhost:8001'
 const USERNAME_REGEX = /^[a-zA-Z0-9一-龥_]{1,20}$/
@@ -12,6 +13,8 @@ const loaded = ref(false)
 const username = ref('')
 const usernameInput = ref('')
 const isLoggedIn = computed(() => username.value.length > 0)
+
+const panelOpen = ref(false)
 
 const showSuggestions = ref(false)
 const activeIdx = ref(-1)
@@ -104,7 +107,11 @@ function handleLogout() {
 }
 
 function handleCsrClick() {
-  showToast('智能客服功能即将上线，敬请期待')
+  if (!isLoggedIn.value) {
+    showToast('请先登录后再咨询客服')
+    return
+  }
+  panelOpen.value = true
 }
 </script>
 
@@ -224,6 +231,12 @@ function handleCsrClick() {
       </svg>
       <span class="csr-pulse" aria-hidden></span>
     </button>
+
+    <CsrPanel
+      v-model:open="panelOpen"
+      :username="username"
+      :api-base="API_BASE"
+    />
 
     <transition name="toast">
       <div v-if="toastMessage" class="toast" role="status" aria-live="polite">

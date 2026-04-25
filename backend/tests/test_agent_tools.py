@@ -1,8 +1,8 @@
 import pytest
 from sqlalchemy.orm import sessionmaker
 
-from app.agent.tools import get_product_info, list_products
-from app.seed import seed_products
+from app.agent.tools import get_product_info, list_products, lookup_orders
+from app.seed import seed_orders, seed_products
 
 
 @pytest.fixture
@@ -58,6 +58,37 @@ def test_should_return_empty_when_searching_unknown_product(tools_session):
 
     # When
     result = get_product_info("不存在的商品")
+
+    # Then
+    assert result == []
+
+
+def test_should_return_two_orders_when_querying_alex(tools_session):
+    # Given (AC1: alex 在 seed 中有 2 单：order_id 1=AUDIO-001、2=KB-001)
+    seed_products(tools_session)
+    seed_orders(tools_session)
+
+    # When
+    result = lookup_orders("alex")
+
+    # Then
+    assert len(result) == 2
+    assert {r["order_id"] for r in result} == {1, 2}
+    expected_keys = {
+        "order_id", "product_name", "product_sku", "quantity",
+        "unit_price", "total_amount",
+        "current_status", "tracking_no", "courier",
+    }
+    assert all(expected_keys <= r.keys() for r in result)
+
+
+def test_should_return_empty_when_user_has_no_orders(tools_session):
+    # Given (AC2: 未知用户返回空列表，不抛异常)
+    seed_products(tools_session)
+    seed_orders(tools_session)
+
+    # When
+    result = lookup_orders("nobody")
 
     # Then
     assert result == []

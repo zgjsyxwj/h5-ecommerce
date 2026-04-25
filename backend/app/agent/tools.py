@@ -1,7 +1,9 @@
+import json
+
 from sqlalchemy import or_, select
 
 from app.database import SessionLocal
-from app.models import Product
+from app.models import Order, Product
 
 
 def list_products() -> list[dict]:
@@ -39,3 +41,24 @@ def get_product_info(query: str) -> list[dict]:
             }
             for p in rows
         ]
+
+
+def lookup_orders(username: str) -> list[dict]:
+    """按用户名列出该用户的所有订单概要（不含完整物流时间线）。"""
+    with SessionLocal() as db:
+        rows = db.scalars(select(Order).where(Order.username == username)).all()
+        result = []
+        for o in rows:
+            logistics = json.loads(o.logistics_info)
+            result.append({
+                "order_id": o.id,
+                "product_name": o.product_name,
+                "product_sku": o.product_sku,
+                "quantity": o.quantity,
+                "unit_price": str(o.unit_price),
+                "total_amount": str(o.total_amount),
+                "current_status": logistics.get("current_status"),
+                "tracking_no": logistics.get("tracking_no"),
+                "courier": logistics.get("courier"),
+            })
+        return result

@@ -476,6 +476,111 @@ return [{"id": p.id, "name": p.name, ...} for p in rows]
 
 ---
 
+## Task 3 — lookup_orders
+
+**覆盖 AC**：AC1（alex 2 单）/ AC2（未知用户空列表）
+**状态**：✅ 完成（Red → Green → 1 regression guard → 不重构）
+
+### 第一次 seed 订单的连锁约束
+
+T1/T2 只 seed `products`。T3 是第一次 seed `orders`，订单的 `product_sku` 字段有 FK 指向 `products.sku`，所以测试里**必须先 `seed_products(tools_session)` 再 `seed_orders(tools_session)`**。
+
+```python
+def test_should_return_two_orders_when_querying_alex(tools_session):
+    # Given
+    seed_products(tools_session)   # ← 必须在 seed_orders 之前
+    seed_orders(tools_session)
+    ...
+```
+
+漏掉前一行：FK 违反，`IntegrityError`。这种**测试基础设施级别的约束**很容易在写作业级别项目时忽略，但在生产场景里同样存在（任何「下单依赖商品已建」的流程都有这个顺序约束）。
+
+### 教学要点 8：用 set 比较 ID 集合，不用 list 比较顺序
+
+```python
+assert {r["order_id"] for r in result} == {1, 2}
+```
+
+为什么不写 `assert result[0]["order_id"] == 1 and result[1]["order_id"] == 2`？
+
+**Spec 没规定返回顺序**。`lookup_orders` 现在返回 SQLAlchemy 默认顺序（一般是插入顺序），但未来可能：
+- 加 `order_by(Order.id.desc())` 让最新订单在前
+- 加 `order_by(current_status)` 让运输中的优先显示
+- 改成按下单时间排
+
+**任何这些改动都不应该让 AC1 测试炸**。绑定行为「alex 有 1 号和 2 号订单」，不绑定实现「按 id 升序返回」。
+
+> **判断方法**：测试断言失败时，问自己：「失败说明 spec 被违反了，还是说明实现细节变了？」如果是后者，断言写得太严了。
+
+### 9 键摘要 vs 14 键详情：list/get pattern
+
+`lookup_orders` 返回 9 键摘要，**故意不含**：
+- `tracking_history`（每单 4 个事件，列表场景 token 爆炸）
+- `recipient` / `address` / `phone`（列表里看不到价值）
+
+`get_order_detail`（T4）返回 14 键详情：摘要 9 键 + 收货人 3 键 + tracking_history。
+
+**为什么分两个 tool？** Token 经济：
+
+| 场景 | Tool 调用 | 上下文成本 |
+|---|---|---|
+| 「我的订单」（列表问题）| `lookup_orders` | 9 键 × 2 单 = 中等 |
+| 「订单 1 物流到哪」（具体问题）| `get_order_detail(1)` | 14 键 × 1 单 = 中等 |
+| 假设合并：每次都给 LLM 完整 14 键 × N 单 | — | 列表场景爆炸 |
+
+这是 **agent 工具设计的常见模式**（list/get pattern）—— REST API 设计里的同一原则：列表接口给摘要，详情接口给完整对象。
+
+### Green 实现要点
+
+```python
+import json
+from sqlalchemy import or_, select
+from app.models import Order, Product  # ← Order 新增
+
+def lookup_orders(username: str) -> list[dict]:
+    """按用户名列出该用户的所有订单概要（不含完整物流时间线）。"""
+    with SessionLocal() as db:
+        rows = db.scalars(select(Order).where(Order.username == username)).all()
+        result = []
+        for o in rows:
+            logistics = json.loads(o.logistics_info)  # ← TEXT 字段需要解析
+            result.append({
+                "order_id": o.id,
+                "product_name": o.product_name,
+                ...
+                "current_status": logistics.get("current_status"),
+                "tracking_no": logistics.get("tracking_no"),
+                "courier": logistics.get("courier"),
+            })
+        return result
+```
+
+为什么不用列表推导，改用普通 for 循环？因为**每行需要先 `json.loads` 再用**。列表推导写成 `[{...} for o in rows]` 会让 `json.loads(o.logistics_info)` 在每个键的 RHS 都重复一次，3 次解析同一字符串。**性能 + 可读性双输**。
+
+> **微教学点**：列表推导适合「每行一个变换」，不适合「每行先做几次准备再组装」。
+
+### Refactor 决策：不抽 `_parse_logistics`
+
+考虑过抽 `_parse_logistics(o) -> dict` helper（本质 `json.loads(o.logistics_info)`）。
+
+**评估**：
+
+| 问题 | 答案 | 影响 |
+|---|---|---|
+| helper 多大？ | 1 行 | **太薄** |
+| 命名能稳定吗？ | `_parse_logistics`，但其实就是个 `json.loads` | 名字过度承诺 |
+| T4 会再用吗？ | 会（拿 recipient/address/phone/tracking_history） | 第 2 处使用 |
+| 即使 T4 用了，要抽吗？ | T3 要 3 键、T4 要 7 键，重叠少 | 抽出去后两边各自取 dict.get，没简化什么 |
+
+**决策：不抽**。理由汇总：
+- 1 行 helper 是**反模式**——给单行表达式起名字反而引入间接性
+- 与 T2 一致：tool 函数透明性优于 DRY
+- 真要重复抽象，等 T4 后看 _**实际**_ 重复形态再说
+
+> **教学陷阱**：很多人看到 2 处一样代码就想抽。但「2 处」+「单行」+「不同上下文」往往不值得 helper。**抽象的回报来自降低未来认知负担，单行 inline 的认知负担本来就接近零**。
+
+---
+
 ## 后续待补充
 
 > 本文档将随 Phase 3-6 推进持续追加。当前进度：
@@ -484,6 +589,7 @@ return [{"id": p.id, "name": p.name, ...} for p in rows]
 > - ✅ Phase 2 — Plan（含 Detroit vs London 派系讨论）
 > - ✅ Task 1 — list_products
 > - ✅ Task 2 — get_product_info（含 regression guards）
-> - ⏸️ Task 3-12 / F1-F3
+> - ✅ Task 3 — lookup_orders（含 AC2 guard、list/get pattern 讨论）
+> - ⏸️ Task 4-12 / F1-F3
 > - ⏸️ Phase 6 — Verify 表
 > - ⏸️ 最终回顾纪律

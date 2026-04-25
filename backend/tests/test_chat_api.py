@@ -1,7 +1,13 @@
 import json
 
 import pytest
-from agno.run.agent import RunCompletedEvent, RunContentEvent
+from agno.models.response import ToolExecution
+from agno.run.agent import (
+    RunCompletedEvent,
+    RunContentEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -85,5 +91,30 @@ def test_should_emit_token_and_done_when_agent_yields_content_then_completed(cha
     parsed = _parse_sse(response.text)
     assert parsed == [
         ("token", {"text": "hi"}),
+        ("done", {"session_id": "s1"}),
+    ]
+
+
+def test_should_emit_tool_start_and_end_when_agent_calls_tool(chat_client):
+    # Given (AC17: ToolCallStartedEvent → tool/start; ToolCallCompletedEvent → tool/end)
+    tool = ToolExecution(tool_name="lookup_orders")
+    events = [
+        ToolCallStartedEvent(created_at=0, tool=tool),
+        ToolCallCompletedEvent(created_at=0, tool=tool),
+        RunCompletedEvent(session_id="s1"),
+    ]
+    client = chat_client(events=events)
+
+    # When
+    response = client.post(
+        "/api/chat",
+        json={"message": "x", "username": "alex", "session_id": "s1"},
+    )
+
+    # Then
+    parsed = _parse_sse(response.text)
+    assert parsed == [
+        ("tool", {"name": "lookup_orders", "phase": "start"}),
+        ("tool", {"name": "lookup_orders", "phase": "end"}),
         ("done", {"session_id": "s1"}),
     ]

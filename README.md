@@ -367,7 +367,7 @@ npm run dev
 
 ```bash
 cd backend
-.venv/bin/pytest -q     # 35 passed
+.venv/bin/pytest -q     # 36 passed
 .venv/bin/pytest -v     # 详细列出每个测试
 ```
 

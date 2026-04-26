@@ -997,15 +997,34 @@ while (true) {
 
 ### Verify 副产品：spec 漏洞清单
 
-跑完发现 spec 没明确定义的灰色地带（不是 bug，是 spec 不完整）：
+端到端冒烟时发现 **2 个 spec 漏洞导致的真实 bug**（自动化测试全绿但生产炸）：
 
-1. **多 token 拼接**：spec AC16 只测了「单个 RunContentEvent」。真实 LLM 会 yield 几十个 RunContentEvent，每次 1-3 字符。当前实现按顺序 append 在 chat.py 里，但 useChat 在前端做拼接时没测。手动冒烟会发现。
-2. **工具调用错误（ToolCallErrorEvent）**：spec 没定义。当前 chat.py 没分支，会被忽略。如果 tool 抛了异常，agent 看不到，可能继续幻觉。**spec 漏洞**。
+#### Bug 1（已修）：`agent.arun` 漏传 `stream=True, stream_events=True`
+
+- **现象**：浏览器发消息 → 立刻收到「服务暂时不可用」。
+- **后端日志**：`'async for' requires an object with __aiter__ method, got coroutine`
+- **根因**：`Agent.arun(...)` 默认非流式，返回 `coroutine`（要 await）；要拿 async iterator 必须显式 `stream=True`。我们的 stub 用 `async def + yield` 直接是 async generator，**测试通过但跟真实 agno 行为不一致**。
+- **教训**：**Stub 与真实 API 的形态差异是 TDD 最大盲区**。Stub 应该模拟真实 API 的 awaitable/iterable 形态，否则测试再绿也救不了。
+- **修法**：chat.py 加 `stream=True, stream_events=True` 参数；测试因 stub 用 `**kwargs` 接走未变。
+
+#### Bug 2（已修）：username 没注入到 LLM 看见的 prompt
+
+- **现象**：问「我的订单到哪了」→ LLM 答「请提供您的用户名」。
+- **根因**：我们把 `username` 传给 `agno` 的 `user_id`（用于分隔 session 的 key），但 **LLM 完全看不到**。LLM 只看到 message 文本「我的订单到哪了」，没 username 上下文，所以反过来问。
+- **教训**：**spec 写「工具按用户名查」时，没说「username 怎么从 HTTP 请求流到 LLM 上下文」**。这是 LLM 工程的常见盲点——HTTP/服务端的「user_id」概念，对 LLM 来说不存在，必须显式注入。
+- **修法**：chat.py 在调用 agent 前 prefix message：`f"[当前登录用户名：{req.username}]\n{req.message}"`。
+- **回归 guard**：补 `test_should_inject_username_into_agent_prompt` 钉住此修复。
+
+> **教学要点 23**：**Phase 6 verify 不是装饰，是真正的 bug 杀手**。前面所有 task 自动化测试 35 全绿，端到端冒烟 5 分钟内捕获 2 个 production-breaking bug。SDD-TDD 的 Phase 6 不能省，**spec 与实现的 fit 检查只能在端到端层面做**。
+
+### 剩余 backlog（不影响本次「全绿验收」）
+
+1. **多 token 拼接**：spec AC16 只测了「单个 RunContentEvent」。真实 LLM 会 yield 几十个 RunContentEvent，每次 1-3 字符。当前实现按顺序 append 在 chat.py 里，前端 useChat 拼接逻辑也通过冒烟验证。
+2. **工具调用错误（ToolCallErrorEvent）**：spec 没定义。当前 chat.py 没分支，会被忽略。如果 tool 抛了异常，agent 看不到，可能继续幻觉。**spec 漏洞**，记入 backlog。
 3. **多个并发用户**：agno SqliteDb 的 SQLite 在并发写场景下可能锁。生产场景需 PostgreSQL。spec Non-goals 没明确说。
 4. **空响应**：如果 LLM 一句话都不说就 done，前端 assistant 气泡会是空字符串。spec 没规定 UX。
 5. **重试按钮的 session 行为**：错误后点重试，是用同一 session_id 还是新建？当前实现用同一 session_id，但 spec 没钉。
-
-这些放进 backlog，不影响本次「全绿验收」。
+6. **Prompt injection 风险**：username 直接拼进 prompt，恶意 username 可注入指令。生产需用 system message 通道而非 prompt 拼接。
 
 ---
 

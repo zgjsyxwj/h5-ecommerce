@@ -30,11 +30,17 @@ def _emit(event_type: str, payload: dict) -> str:
 @router.post("/api/chat")
 async def chat(req: ChatRequest):
     agent = get_agent()
+    # 把 username 注入 prompt 前缀，LLM 调用 lookup_orders 等工具时直接用
+    prompt = f"[当前登录用户名：{req.username}]\n{req.message}"
 
     async def sse():
         try:
             async for ev in agent.arun(
-                req.message, user_id=req.username, session_id=req.session_id
+                prompt,
+                user_id=req.username,
+                session_id=req.session_id,
+                stream=True,
+                stream_events=True,
             ):
                 if isinstance(ev, RunContentEvent):
                     yield _emit("token", {"text": ev.content})

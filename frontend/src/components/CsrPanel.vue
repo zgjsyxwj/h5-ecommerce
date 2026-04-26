@@ -1,6 +1,14 @@
 <script setup>
 import { ref, computed, watch, nextTick } from 'vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { useChat } from '../composables/useChat.js'
+
+marked.setOptions({ breaks: true, gfm: true })
+
+function renderMd(text) {
+  return DOMPurify.sanitize(marked.parse(text || ''))
+}
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -71,7 +79,7 @@ watch(
             <div class="bubble">{{ m.text }}</div>
           </div>
           <div v-else-if="m.role === 'assistant'" class="msg msg--assistant">
-            <div class="bubble">{{ m.text }}</div>
+            <div class="bubble bubble--md" v-html="renderMd(m.text)" />
           </div>
           <div v-else-if="m.role === 'tool'" class="msg msg--tool">
             <span class="tool-text">{{ m.text }}</span>
@@ -177,6 +185,37 @@ watch(
   color: var(--ink);
   border: 1px solid var(--rule);
 }
+
+/* markdown rendered content inside assistant bubble */
+.bubble--md :deep(p) { margin: 0; }
+.bubble--md :deep(p + p) { margin-top: 8px; }
+.bubble--md :deep(strong) { font-weight: 600; color: var(--ink); }
+.bubble--md :deep(em) { font-style: italic; }
+.bubble--md :deep(ul),
+.bubble--md :deep(ol) { margin: 6px 0 6px 0; padding-left: 20px; }
+.bubble--md :deep(li) { margin: 2px 0; }
+.bubble--md :deep(li > p) { display: inline; }
+.bubble--md :deep(code) {
+  background: var(--paper-2);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+.bubble--md :deep(pre) {
+  background: var(--paper-2);
+  padding: 8px 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 6px 0;
+  font-size: 0.92em;
+}
+.bubble--md :deep(pre code) { background: transparent; padding: 0; }
+.bubble--md :deep(a) { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.bubble--md :deep(h1),
+.bubble--md :deep(h2),
+.bubble--md :deep(h3) { font-size: 14px; font-weight: 600; margin: 8px 0 4px; }
+.bubble--md :deep(hr) { border: 0; border-top: 1px solid var(--rule); margin: 8px 0; }
 
 .tool-text {
   color: var(--ink-3);
